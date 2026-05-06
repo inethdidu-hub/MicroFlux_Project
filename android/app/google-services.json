@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "430832646154",
+    "firebase_url": "https://microplux-anti-theft-app-2026-default-rtdb.firebaseio.com",
+    "project_id": "microplux-anti-theft-app-2026",
+    "storage_bucket": "microplux-anti-theft-app-2026.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:430832646154:android:c97cae6199ad960bf687f3",
+        "android_client_info": {
+          "package_name": "com.example.anti_theft_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC1Rmv9z5H_FZ73wAN_SfYoSTQGgRvoEYg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

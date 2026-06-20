@@ -1,0 +1,13 @@
+{
+  "name": "firebase-http-proxy",
+  "version": "1.0.0",
+  "description": "HTTP-to-HTTPS relay proxy for A9G cellular tracker to connect to Firebase Realtime Database",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

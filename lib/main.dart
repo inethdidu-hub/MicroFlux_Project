@@ -7,14 +7,11 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'background_service.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  await Permission.notification.request();
-  await Permission.locationAlways.request();
-  await Permission.ignoreBatteryOptimizations.request();
-  await initializeBackgroundService();
   runApp(const MicroFluxApp());
 }
 
@@ -50,14 +47,38 @@ class _SplashState extends State<SplashScreen> {
   }
 
   Future<void> _checkStatus() async {
-    Timer(const Duration(seconds: 3), () {
+    final prefs = await SharedPreferences.getInstance();
+    final String sim = prefs.getString('sim_number') ?? '';
+    final String ssid = prefs.getString('ssid') ?? '';
+
+    Timer(const Duration(seconds: 3), () async {
       if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => const RegisterScreen(),
-        ),
-      );
+      if (sim.isNotEmpty && ssid.isNotEmpty) {
+        // Request permissions and start service
+        await Permission.notification.request();
+        await Permission.locationAlways.request();
+        await Permission.ignoreBatteryOptimizations.request();
+        
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+        if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+          await initializeBackgroundService();
+        }
+
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const Dashboard()),
+        );
+      } else {
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const RegisterScreen()),
+        );
+      }
     });
   }
 
@@ -136,6 +157,19 @@ class _RegisterState extends State<RegisterScreen> {
       await prefs.setString('sim_number', sim);
       await prefs.setString('ssid', ssid);
       await prefs.setString('wifi_password', pass);
+
+      // Request permissions and start service
+      await Permission.notification.request();
+      await Permission.locationAlways.request();
+      await Permission.ignoreBatteryOptimizations.request();
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+        await initializeBackgroundService();
+      }
 
       if (!mounted) return;
       Navigator.pushReplacement(
@@ -264,6 +298,12 @@ class _DashState extends State<Dashboard> {
   String _status = "🛡️ System Secure";
   int _batteryLevel = 100;
 
+  bool _tamper = false;
+  bool _isRinging = false;
+  double _alarmVolume = 1.0;
+  double? _bagLat;
+  double? _bagLon;
+
   @override
   void initState() {
     super.initState();
@@ -276,17 +316,19 @@ class _DashState extends State<Dashboard> {
     setState(() {
       _limit = prefs.getDouble('threshold') ?? 20.0;
       _playMusicMode = prefs.getBool('play_music') ?? true;
+      _alarmVolume = prefs.getDouble('alarm_volume') ?? 1.0;
     });
   }
 
-  // Local notifications handled by background service
-
   Future<void> _startTracking() async {
-    bool permission =
-        await Geolocator.requestPermission() == LocationPermission.always ||
-        await Geolocator.requestPermission() == LocationPermission.whileInUse;
-
-    if (!permission) return;
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return;
+    }
 
     Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -299,19 +341,22 @@ class _DashState extends State<Dashboard> {
       _updateLogic();
     });
 
-    _db.child("bag_data/bag_location").onValue.listen((event) {
+    _db.child("bag_data/lat").onValue.listen((event) {
       if (!mounted) return;
-      final data = event.snapshot.value;
-      if (data == null) return;
+      final val = event.snapshot.value;
+      if (val != null) {
+        _bagLat = double.tryParse(val.toString());
+        _updateBagLatLng();
+      }
+    });
 
-      final d = Map<dynamic, dynamic>.from(data as Map);
-      setState(() {
-        _bag = LatLng(
-          double.tryParse(d['lat']?.toString() ?? '0') ?? 0,
-          double.tryParse(d['lon']?.toString() ?? '0') ?? 0,
-        );
-      });
-      _updateLogic();
+    _db.child("bag_data/lon").onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value;
+      if (val != null) {
+        _bagLon = double.tryParse(val.toString());
+        _updateBagLatLng();
+      }
     });
 
     _db.child("bag_data/battery").onValue.listen((event) {
@@ -322,6 +367,32 @@ class _DashState extends State<Dashboard> {
         });
       }
     });
+
+    _db.child("bag_data/tamper").onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value;
+      setState(() {
+        _tamper = (val == true || val == "true" || val == 1);
+      });
+      _updateLogic();
+    });
+
+    FlutterBackgroundService().on('ringing_status').listen((event) {
+      if (event != null && mounted) {
+        setState(() {
+          _isRinging = event['ringing'] == true;
+        });
+      }
+    });
+  }
+
+  void _updateBagLatLng() {
+    if (_bagLat != null && _bagLon != null) {
+      setState(() {
+        _bag = LatLng(_bagLat!, _bagLon!);
+      });
+      _updateLogic();
+    }
   }
 
   void _updateLogic() {
@@ -334,12 +405,13 @@ class _DashState extends State<Dashboard> {
       _bag!.longitude,
     );
 
-    final bool inDanger = _dist > _limit;
-    _status = inDanger ? "⚠️ PROXIMITY VIOLATION" : "🛡️ System Secure";
+    final bool inDanger = _dist > _limit || _tamper;
+    _status = _tamper 
+        ? "🚨 DEVICE REMOVED" 
+        : (inDanger ? "⚠️ PROXIMITY VIOLATION" : "🛡️ System Secure");
 
     if (mounted) setState(() {});
     
-    // Throttle automatic Firebase updates to prevent massive slowdowns
     if (_lastAlarm != inDanger || (_lastDist - _dist).abs() > 5 || _lastLimit != _limit.toInt()) {
       _lastAlarm = inDanger;
       _lastDist = _dist;
@@ -357,7 +429,7 @@ class _DashState extends State<Dashboard> {
       "rc": _ringcut,
       "l": _led,
       "b": _buzzer,
-      "alarm": _dist > _limit,
+      "alarm": (_dist > _limit || _tamper),
       "msg": _status,
       "dist": _dist.toStringAsFixed(1),
       "threshold": _limit.toInt(),
@@ -404,6 +476,7 @@ class _DashState extends State<Dashboard> {
                     setState(() => _limit = tempLimit);
                     final prefs = await SharedPreferences.getInstance();
                     await prefs.setDouble('threshold', _limit);
+                    FlutterBackgroundService().invoke('set_threshold', {'threshold': _limit});
                     _updateLogic();
                     Navigator.pop(context);
                   }, 
@@ -473,7 +546,7 @@ class _DashState extends State<Dashboard> {
 
   @override
   Widget build(BuildContext context) {
-    bool inDanger = _dist > _limit;
+    bool inDanger = _dist > _limit || _tamper;
 
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
@@ -498,7 +571,9 @@ class _DashState extends State<Dashboard> {
             child: Column(
               children: [
                 Text(
-                  inDanger ? "PROXIMITY ALERT" : "SYSTEM SECURE",
+                  _tamper 
+                      ? "DEVICE REMOVED" 
+                      : (inDanger ? "PROXIMITY ALERT" : "SYSTEM SECURE"),
                   style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 1.5),
                 ),
                 const SizedBox(height: 20),
@@ -510,52 +585,180 @@ class _DashState extends State<Dashboard> {
                     _buildStatItem(Icons.social_distance, "${_dist.toInt()} m", "Distance"),
                     _buildStatItem(Icons.tune, "${_limit.toInt()} m", "Limit", onTap: _showLimitDialog),
                   ],
-                )
+                ),
+                if (_isRinging) ...[
+                  const SizedBox(height: 15),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      FlutterBackgroundService().invoke("mute_alarm");
+                      setState(() {
+                        _isRinging = false;
+                      });
+                    },
+                    icon: const Icon(Icons.volume_off, color: Colors.red),
+                    label: const Text(
+                      "MUTE PHONE ALARM", 
+                      style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, letterSpacing: 1)
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
           Expanded(
-            child: GridView.count(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
-              crossAxisCount: 2,
-              crossAxisSpacing: 15,
-              mainAxisSpacing: 15,
-              childAspectRatio: 1.1,
-              children: [
-                _buildGridItem("LED Light", Icons.lightbulb, Colors.orange, () {
-                  setState(() => _led = !_led);
-                  _sendCommandsToFirebase();
-                }, isActive: _led),
-                _buildGridItem("Buzzer", Icons.volume_up, Colors.blue, () {
-                  setState(() => _buzzer = !_buzzer);
-                  _sendCommandsToFirebase();
-                }, isActive: _buzzer),
-                _buildGridItem("Ringcut", Icons.power_settings_new, Colors.red, () {
-                  setState(() => _ringcut = !_ringcut);
-                  _sendCommandsToFirebase();
-                }, isActive: _ringcut),
-                _buildGridItem("Phone Alarm", Icons.music_note, Colors.purple, () async {
-                  setState(() => _playMusicMode = !_playMusicMode);
-                  final prefs = await SharedPreferences.getInstance();
-                  await prefs.setBool('play_music', _playMusicMode);
-                }, isActive: _playMusicMode),
-                _buildGridItem("GPS Map", Icons.map, Colors.green, () {
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(bagLoc: _bag, phoneLoc: _phone, dist: _dist)));
-                }, isActive: true),
-                _buildGridItem("SMS Location", Icons.sms, Colors.teal, () {
-                  _sendSmsCommand();
-                }, isActive: true),
-              ],
+              child: Column(
+                children: [
+                  // --- DEVICE REMOVAL STATUS CARD ---
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(20),
+                    margin: const EdgeInsets.only(bottom: 15),
+                    decoration: BoxDecoration(
+                      color: _tamper ? const Color(0xFFFFEBEE) : const Color(0xFFE8F5E9),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: _tamper ? const Color(0xFFEF5350) : const Color(0xFF66BB6A),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _tamper ? Icons.report_problem : Icons.gpp_good,
+                          color: _tamper ? const Color(0xFFD32F2F) : const Color(0xFF388E3C),
+                          size: 36,
+                        ),
+                        const SizedBox(width: 15),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                "Device Removal Status",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                  color: _tamper ? const Color(0xFFB71C1C) : const Color(0xFF1B5E20),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                _tamper 
+                                    ? "Your device has been removed from your bag" 
+                                    : "The tracking module is securely inside the bag.",
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: _tamper ? const Color(0xFFC62828) : const Color(0xFF2E7D32),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // --- PHONE ALARM VOLUME SLIDER CARD ---
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(15),
+                    margin: const EdgeInsets.only(bottom: 15),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.05),
+                          blurRadius: 10,
+                          offset: const Offset(0, 5),
+                        )
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.volume_up, color: Colors.purple, size: 22),
+                            const SizedBox(width: 8),
+                            Text(
+                              "Alarm Volume: ${(_alarmVolume * 100).toInt()}%",
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: _alarmVolume,
+                          min: 0.0,
+                          max: 1.0,
+                          activeColor: Colors.purple,
+                          inactiveColor: Colors.purple.shade100,
+                          onChanged: (val) {
+                            setState(() {
+                              _alarmVolume = val;
+                            });
+                            FlutterBackgroundService().invoke('set_volume', {'volume': val});
+                          },
+                          onChangeEnd: (val) async {
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.setDouble('alarm_volume', val);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // --- 6 OPTION CONTROLS (GRID) ---
+                  GridView.count(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    crossAxisCount: 2,
+                    crossAxisSpacing: 15,
+                    mainAxisSpacing: 15,
+                    childAspectRatio: 1.1,
+                    children: [
+                      _buildGridItem("LED Light", Icons.lightbulb, Colors.orange, () {
+                        setState(() => _led = !_led);
+                        _sendCommandsToFirebase();
+                      }, isActive: _led),
+                      _buildGridItem("Buzzer", Icons.volume_up, Colors.blue, () {
+                        setState(() => _buzzer = !_buzzer);
+                        _sendCommandsToFirebase();
+                      }, isActive: _buzzer),
+                      _buildGridItem("Ringcut", Icons.phone_android, Colors.red, () {
+                        setState(() => _ringcut = !_ringcut);
+                        _sendCommandsToFirebase();
+                      }, isActive: _ringcut),
+                      _buildGridItem("Phone Alarm", Icons.music_note, Colors.purple, () async {
+                        setState(() => _playMusicMode = !_playMusicMode);
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.setBool('play_music', _playMusicMode);
+                        FlutterBackgroundService().invoke('set_play_music', {'play_music': _playMusicMode});
+                      }, isActive: _playMusicMode),
+                      _buildGridItem("GPS Map", Icons.map, Colors.green, () {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(bagLoc: _bag, phoneLoc: _phone, dist: _dist)));
+                      }, isActive: true),
+                      _buildGridItem("SMS Location", Icons.sms, Colors.teal, () {
+                        _sendSmsCommand();
+                      }, isActive: true),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ],
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    super.dispose();
   }
 }
 
@@ -611,10 +814,8 @@ class _BatteryPainter extends CustomPainter {
 
     Rect rect = Rect.fromCenter(center: Offset(size.width / 2, size.height), width: size.width, height: size.height * 2);
     
-    // Draw background arc
     canvas.drawArc(rect, 3.14159, 3.14159, false, bgPaint);
     
-    // Draw foreground arc
     double sweepAngle = (percentage / 100) * 3.14159;
     canvas.drawArc(rect, 3.14159, sweepAngle, false, fgPaint);
   }
@@ -623,7 +824,8 @@ class _BatteryPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
 
-class MapScreen extends StatelessWidget {
+// ── MAP SCREEN ───────────────────────────────────────────────────────────────────
+class MapScreen extends StatefulWidget {
   final LatLng? bagLoc;
   final LatLng? phoneLoc;
   final double dist;
@@ -631,30 +833,207 @@ class MapScreen extends StatelessWidget {
   const MapScreen({super.key, this.bagLoc, this.phoneLoc, required this.dist});
 
   @override
+  State<MapScreen> createState() => _MapScreenState();
+}
+
+class _MapScreenState extends State<MapScreen> {
+  List<LatLng> _path = [];
+  final DatabaseReference _db = FirebaseDatabase.instance.ref();
+  StreamSubscription? _latSub, _lonSub;
+  double? _liveLat;
+  double? _liveLon;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadHistoryPath();
+    _startLiveSub();
+  }
+
+  Future<void> _loadHistoryPath() async {
+    final prefs = await SharedPreferences.getInstance();
+    final history = prefs.getStringList('bag_path_history') ?? [];
+    List<LatLng> tempPath = [];
+    for (var str in history) {
+      final parts = str.split(',');
+      if (parts.length == 2) {
+        double? lat = double.tryParse(parts[0]);
+        double? lon = double.tryParse(parts[1]);
+        if (lat != null && lon != null) {
+          tempPath.add(LatLng(lat, lon));
+        }
+      }
+    }
+    setState(() {
+      _path = tempPath;
+    });
+  }
+
+  void _startLiveSub() {
+    _latSub = _db.child("bag_data/lat").onValue.listen((event) {
+      final val = event.snapshot.value;
+      if (val != null) {
+        _liveLat = double.tryParse(val.toString());
+        _updateLivePath();
+      }
+    });
+
+    _lonSub = _db.child("bag_data/lon").onValue.listen((event) {
+      final val = event.snapshot.value;
+      if (val != null) {
+        _liveLon = double.tryParse(val.toString());
+        _updateLivePath();
+      }
+    });
+  }
+
+  void _updateLivePath() {
+    if (_liveLat != null && _liveLon != null) {
+      final newLoc = LatLng(_liveLat!, _liveLon!);
+      if (_path.isEmpty || _path.last.latitude != newLoc.latitude || _path.last.longitude != newLoc.longitude) {
+        setState(() {
+          _path.add(newLoc);
+        });
+      }
+    }
+  }
+
+  Future<void> _clearPath() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('bag_path_history');
+    setState(() {
+      _path.clear();
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Path history cleared.")),
+      );
+    }
+  }
+
+  Future<void> _savePath() async {
+    if (_path.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No path to save!")),
+      );
+      return;
+    }
+
+    final textController = TextEditingController(
+      text: "Trip_${DateTime.now().hour}_${DateTime.now().minute}",
+    );
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text("Save Current Path"),
+          content: TextField(
+            controller: textController,
+            decoration: const InputDecoration(labelText: "Path Name"),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("CANCEL"),
+            ),
+            TextButton(
+              onPressed: () async {
+                final String name = textController.text.trim();
+                if (name.isEmpty) return;
+
+                final prefs = await SharedPreferences.getInstance();
+                List<String> savedNames = prefs.getStringList('saved_paths_list') ?? [];
+                
+                List<Map<String, double>> pathData = _path
+                    .map((pt) => {'lat': pt.latitude, 'lon': pt.longitude})
+                    .toList();
+                
+                savedNames.add(name);
+                await prefs.setStringList('saved_paths_list', savedNames);
+                
+                String serialized = pathData.map((pt) => '${pt['lat']},${pt['lon']}').join(';');
+                await prefs.setString('saved_path_$name', serialized);
+
+                if (mounted) {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Path saved as '$name'!")),
+                  );
+                }
+              },
+              child: const Text("SAVE"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    LatLng initialTarget = widget.bagLoc ?? const LatLng(6.128108, 80.561877);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("GPS Tracking Map"),
         backgroundColor: const Color(0xFFFFB75E),
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: "Clear Path History",
+            onPressed: _clearPath,
+          ),
+          IconButton(
+            icon: const Icon(Icons.save),
+            tooltip: "Save Current Path",
+            onPressed: _savePath,
+          ),
+        ],
       ),
-      body: bagLoc == null
+      body: widget.bagLoc == null && _path.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : GoogleMap(
               initialCameraPosition: CameraPosition(
-                target: bagLoc!,
+                target: _path.isNotEmpty ? _path.last : initialTarget,
                 zoom: 17,
               ),
               markers: {
-                Marker(
-                  markerId: const MarkerId("bag"),
-                  position: bagLoc!,
-                  icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-                ),
+                if (widget.bagLoc != null)
+                  Marker(
+                    markerId: const MarkerId("bag"),
+                    position: widget.bagLoc!,
+                    icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+                    infoWindow: const InfoWindow(title: "Current Bag Location"),
+                  ),
+                if (widget.phoneLoc != null)
+                  Marker(
+                    markerId: const MarkerId("phone"),
+                    position: widget.phoneLoc!,
+                    icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+                    infoWindow: const InfoWindow(title: "Phone Location"),
+                  ),
+              },
+              polylines: {
+                if (_path.isNotEmpty)
+                  Polyline(
+                    polylineId: const PolylineId("bag_path"),
+                    points: _path,
+                    color: Colors.blueAccent,
+                    width: 4,
+                  ),
               },
               myLocationEnabled: true,
               myLocationButtonEnabled: true,
             ),
     );
+  }
+
+  @override
+  void dispose() {
+    _latSub?.cancel();
+    _lonSub?.cancel();
+    super.dispose();
   }
 }

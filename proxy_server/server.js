@@ -5,7 +5,7 @@ const FIREBASE_HOST = 'microplux-anti-theft-app-2026-default-rtdb.firebaseio.com
 const PORT = process.env.PORT || 8080;
 
 const server = http.createServer((req, res) => {
-  // Add CORS headers to prevent browser/app blocking
+  // CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -16,22 +16,24 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  console.log(`[PROXY] Relaying request: ${req.method} ${req.url}`);
+  console.log(`[PROXY] Incoming: ${req.method} ${req.url}`);
+  
+  // Clone incoming headers and override host for Firebase
+  const headers = { ...req.headers };
+  headers['host'] = FIREBASE_HOST;
+  delete headers['accept-encoding']; // Avoid compression issues
 
-  // Create HTTPS options to forward to Firebase Realtime Database
   const options = {
     hostname: FIREBASE_HOST,
     port: 443,
     path: req.url,
     method: req.method,
-    headers: {
-      'Content-Type': req.headers['content-type'] || 'application/json',
-      'Host': FIREBASE_HOST
-    }
+    headers: headers
   };
 
   const firebaseReq = https.request(options, (firebaseRes) => {
-    // Forward Firebase headers and status code back to client
+    console.log(`[PROXY] Firebase Response: ${firebaseRes.statusCode}`);
+    
     res.writeHead(firebaseRes.statusCode, {
       'Content-Type': firebaseRes.headers['content-type'] || 'application/json',
       'Access-Control-Allow-Origin': '*'
@@ -40,15 +42,15 @@ const server = http.createServer((req, res) => {
   });
 
   firebaseReq.on('error', (err) => {
-    console.error(`[PROXY ERROR] ${err.message}`);
+    console.error(`[PROXY CONNECTION ERROR] URL: ${req.url}, Error: ${err.message}`);
     res.writeHead(500, { 'Content-Type': 'text/plain' });
     res.end(`Proxy Error: ${err.message}`);
   });
 
-  // Pipe the request body from A9G to Firebase
+  // Pipe request body from client to Firebase
   req.pipe(firebaseReq);
 });
 
 server.listen(PORT, () => {
-  console.log(`Generic HTTP-to-HTTPS Firebase Proxy running on port ${PORT}`);
+  console.log(`HTTP-to-HTTPS Proxy running on port ${PORT}`);
 });

@@ -4,9 +4,8 @@
 #include "soc/soc.h"           
 #include "soc/rtc_cntl_reg.h"  
 
-// Update this URL to point to your HTTP proxy server (e.g., "http://your-proxy-domain.com/" or "http://your-ngrok-subdomain.ngrok-free.app/")
-// NOTE: MUST use http (port 80) to bypass A9G SSL/TLS handshake error 53.
-const String FB_URL = "http://your-proxy-domain-or-ip/";
+// Deployed Render proxy URL (Testing plain HTTP)
+const String FB_URL = "http://microflux-project.onrender.com/";
 const int buzzerPin = 13, ledPin = 14, onboardLED = 2, reedPin = 26, voltPin = 34;
 
 HardwareSerial A9G(2); 
@@ -50,7 +49,7 @@ void setup() {
 
   A9G.begin(115200, SERIAL_8N1, 16, 17); delay(3000);
   sendCmd("AT+GPS=1", "OK", 1000);
-  sendCmd("AT+GPSRD=1", "OK", 1000);
+  sendCmd("AT+GPSRD=10", "OK", 1000);
   sendCmd("AT+CMGF=1", "OK", 1000);
   sendCmd("AT+CLIP=1", "OK", 1000);
   sendCmd("AT+CSCS=\"GSM\"", "OK", 1000);
@@ -100,6 +99,9 @@ bool initGPRS() {
     Serial.println("[GPRS] PDP context activation failed!");
     return false;
   }
+  
+  // Set Google DNS to resolve "Dns,fail,try url" errors
+  sendCmd("AT+CDNSCFG=\"8.8.8.8\",\"8.8.4.4\"", "OK", 2000);
   
   // Verify assigned IP address
   sendCmd("AT+CGPADDR=1", "OK", 2000);

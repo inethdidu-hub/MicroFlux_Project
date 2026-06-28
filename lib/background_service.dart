@@ -71,6 +71,7 @@ void onStart(ServiceInstance service) async {
   double phoneLon = 0;
   double bagLat = 0;
   double bagLon = 0;
+  bool isLbs = false;
   double alarmVolume = 1.0;
   bool isMuted = false;
   bool lastInDanger = false;
@@ -173,24 +174,41 @@ void onStart(ServiceInstance service) async {
   void checkStatus() {
     bool inDanger = false;
     String cause = "";
+    String currentMsg = "Signal Tracking";
 
-    if (isReedSwitchOpen) {
-      inDanger = true;
-      cause = "Your device has been removed from your bag";
-    } else if (distance > threshold) {
-      inDanger = true;
-      cause = "🚨 BAG OUT OF RANGE! (${distance.toInt()}m)";
+    bool isGPSInvalid = (bagLat == 0.0 && bagLon == 0.0) || isLbs;
+
+    if (isGPSInvalid) {
+      inDanger = false;
+      currentMsg = isLbs ? "Signal Tracking (LBS Coarse)" : "Signal Tracking";
+      cause = "";
+    } else {
+      if (isReedSwitchOpen && distance > threshold) {
+        inDanger = true;
+        currentMsg = "Device Removed and Bag is beyond the limit distance";
+        cause = "Device Removed and Bag is beyond the limit distance";
+      } else if (isReedSwitchOpen) {
+        inDanger = true;
+        currentMsg = "Device Removed";
+        cause = "Device Removed";
+      } else if (distance > threshold) {
+        inDanger = true;
+        currentMsg = "Bag is not secure. Limit distance is exceeded";
+        cause = "Bag is not secure. Limit distance is exceeded";
+      } else {
+        inDanger = false;
+        currentMsg = "System Secure";
+        cause = "";
+      }
     }
 
     // Update Firebase commands node
-    if (inDanger != lastInDanger || (distance - lastFirebaseDist).abs() > 5) {
+    if (inDanger != lastInDanger || (distance - lastFirebaseDist).abs() > 5 || isGPSInvalid != (lastFirebaseDist == 0.0 && lastInDanger == false)) {
       lastInDanger = inDanger;
       lastFirebaseDist = distance;
       db.child("commands").update({
         "alarm": inDanger && !isMuted,
-        "msg": inDanger 
-            ? (isReedSwitchOpen ? "⚠️ DEVICE REMOVED" : "⚠️ PROXIMITY VIOLATION") 
-            : "🛡️ System Secure",
+        "msg": currentMsg,
         "dist": distance.toStringAsFixed(1),
       });
     }
@@ -200,7 +218,7 @@ void onStart(ServiceInstance service) async {
       stopAlarm();
     } else {
       if (playMusicAlarm && !isMuted) {
-        triggerAlarm(isReedSwitchOpen ? "SECURITY ALERT" : "MICROFLUX ALERT", cause);
+        triggerAlarm(isReedSwitchOpen ? "Device Removed" : "Bag Limit Exceeded", cause);
       } else {
         stopAlarm();
       }
@@ -229,7 +247,10 @@ void onStart(ServiceInstance service) async {
   }
 
   void _updateBgDistance() {
-    if (phoneLat != 0 && phoneLon != 0 && bagLat != 0 && bagLon != 0) {
+    if ((bagLat == 0.0 && bagLon == 0.0) || isLbs) {
+      distance = 0.0;
+      checkStatus();
+    } else if (phoneLat != 0 && phoneLon != 0) {
       distance = Geolocator.distanceBetween(phoneLat, phoneLon, bagLat, bagLon);
       checkStatus();
     }
@@ -270,6 +291,11 @@ void onStart(ServiceInstance service) async {
     });
   });
 
+  service.on('stop_service').listen((event) {
+    stopAlarm();
+    service.stopSelf();
+  });
+
   // Watchdog timer (no SharedPreferences disk I/O, purely memory check)
   Timer.periodic(const Duration(seconds: 5), (timer) {
     checkStatus();
@@ -299,6 +325,12 @@ void onStart(ServiceInstance service) async {
       savePointToHistory(bagLat, bagLon);
       _updateBgDistance();
     }
+  });
+
+  db.child("bag_data/lbs").onValue.listen((event) {
+    final val = event.snapshot.value;
+    isLbs = (val == true || val == "true" || val == 1);
+    _updateBgDistance();
   });
 
   // 4. Listen to Battery

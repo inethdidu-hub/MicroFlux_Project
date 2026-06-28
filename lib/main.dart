@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'background_service.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 
@@ -118,6 +119,7 @@ class RegisterScreen extends StatefulWidget {
 
 class _RegisterState extends State<RegisterScreen> {
   final _simController = TextEditingController();
+  final _ownerPhoneController = TextEditingController();
   final _ssidController = TextEditingController();
   final _passController = TextEditingController();
   bool _isLoading = false;
@@ -132,6 +134,7 @@ class _RegisterState extends State<RegisterScreen> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _simController.text = prefs.getString('sim_number') ?? '';
+      _ownerPhoneController.text = prefs.getString('owner_phone') ?? '';
       _ssidController.text = prefs.getString('ssid') ?? '';
       _passController.text = prefs.getString('wifi_password') ?? '';
     });
@@ -139,13 +142,34 @@ class _RegisterState extends State<RegisterScreen> {
 
   Future<void> _saveAndGo() async {
     final String sim = _simController.text.trim();
+    final String ownerPhone = _ownerPhoneController.text.trim();
     final String ssid = _ssidController.text.trim();
     final String pass = _passController.text.trim();
-    if (sim.isEmpty || ssid.isEmpty || pass.isEmpty) return;
+    if (sim.isEmpty || ownerPhone.isEmpty || ssid.isEmpty || pass.isEmpty) return;
 
     setState(() => _isLoading = true);
 
     try {
+      // Automatically fetch current phone location for Wi-Fi zone mapping
+      double phoneLat = 0.0;
+      double phoneLon = 0.0;
+      try {
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+        if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+          Position position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.high,
+            timeLimit: const Duration(seconds: 5),
+          );
+          phoneLat = position.latitude;
+          phoneLon = position.longitude;
+        }
+      } catch (e) {
+        debugPrint("Error fetching phone GPS location: $e");
+      }
+
       final db = FirebaseDatabase.instance.ref();
       await db.child("config/network").set({
         "sim": sim,
@@ -153,8 +177,20 @@ class _RegisterState extends State<RegisterScreen> {
         "password": pass,
       });
 
+      await db.child("commands").update({
+        "owner_phone": ownerPhone,
+      });
+
+      if (phoneLat != 0.0 && phoneLon != 0.0) {
+        await db.child("commands").update({
+          "wifi_lat": phoneLat,
+          "wifi_lon": phoneLon,
+        });
+      }
+
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('sim_number', sim);
+      await prefs.setString('owner_phone', ownerPhone);
       await prefs.setString('ssid', ssid);
       await prefs.setString('wifi_password', pass);
 
@@ -169,6 +205,16 @@ class _RegisterState extends State<RegisterScreen> {
       }
       if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
         await initializeBackgroundService();
+      }
+
+      // Launch SMS configuration composer automatically
+      final Uri smsUri = Uri.parse('sms:$sim?body=WIFI:$ssid,$pass');
+      try {
+        if (await canLaunchUrl(smsUri)) {
+          await launchUrl(smsUri);
+        }
+      } catch (e) {
+        debugPrint("Error launching SMS composer: $e");
       }
 
       if (!mounted) return;
@@ -247,6 +293,7 @@ class _RegisterState extends State<RegisterScreen> {
                   ),
                   const SizedBox(height: 40),
                   _buildGlassField("A9G SIM NUMBER", _simController, type: TextInputType.phone),
+                  _buildGlassField("OWNER PHONE NUMBER", _ownerPhoneController, type: TextInputType.phone),
                   _buildGlassField("WIFI SSID", _ssidController),
                   _buildGlassField("WIFI PASSWORD", _passController, obscure: true),
                   const SizedBox(height: 10),
@@ -285,11 +332,11 @@ class Dashboard extends StatefulWidget {
   @override
   State<Dashboard> createState() => _DashState();
 }
-
 class _DashState extends State<Dashboard> {
   final _db = FirebaseDatabase.instance.ref();
   LatLng? _phone, _bag;
   double _dist = 0;
+  double _wifiDist = -1.0;
   double _limit = 20.0;
   bool _ringcut = false;
   bool _led = false;
@@ -297,6 +344,9 @@ class _DashState extends State<Dashboard> {
   bool _playMusicMode = true;
   String _status = "🛡️ System Secure";
   int _batteryLevel = 100;
+  int _csqVal = 0;
+  bool _lbs = false;
+  bool _gpsLocked = false;
 
   bool _tamper = false;
   bool _isRinging = false;
@@ -377,6 +427,44 @@ class _DashState extends State<Dashboard> {
       _updateLogic();
     });
 
+    _db.child("bag_data/lbs").onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value;
+      setState(() {
+        _lbs = (val == true || val == "true" || val == 1);
+      });
+      _updateLogic();
+    });
+
+    _db.child("bag_data/wifi_dist").onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value;
+      if (val != null) {
+        setState(() {
+          _wifiDist = double.tryParse(val.toString()) ?? -1.0;
+        });
+        _updateLogic();
+      }
+    });
+
+    _db.child("bag_data/gps_locked").onValue.listen((event) {
+      if (!mounted) return;
+      final val = event.snapshot.value;
+      setState(() {
+        _gpsLocked = (val == true || val == "true" || val == 1);
+      });
+      _updateLogic();
+    });
+
+    _db.child("bag_data/csq").onValue.listen((event) {
+      if (!mounted) return;
+      if (event.snapshot.value != null) {
+        setState(() {
+          _csqVal = int.tryParse(event.snapshot.value.toString()) ?? 0;
+        });
+      }
+    });
+
     FlutterBackgroundService().on('ringing_status').listen((event) {
       if (event != null && mounted) {
         setState(() {
@@ -398,12 +486,28 @@ class _DashState extends State<Dashboard> {
   void _updateLogic() {
     if (_phone == null || _bag == null) return;
 
-    _dist = Geolocator.distanceBetween(
-      _phone!.latitude,
-      _phone!.longitude,
-      _bag!.latitude,
-      _bag!.longitude,
-    );
+    bool isGPSInvalid = (_bag!.latitude == 0.0 && _bag!.longitude == 0.0);
+    bool isLbs = _lbs == true;
+
+    if (isGPSInvalid && _wifiDist <= 0.0) {
+      setState(() {
+        _status = isLbs ? "LBS Location Active" : "Connecting to GPS...";
+        _dist = 0.0;
+      });
+      _sendCommandsToFirebase();
+      return;
+    }
+
+    if (_wifiDist > 0.0) {
+      _dist = _wifiDist;
+    } else {
+      _dist = Geolocator.distanceBetween(
+        _phone!.latitude,
+        _phone!.longitude,
+        _bag!.latitude,
+        _bag!.longitude,
+      );
+    }
 
     final bool inDanger = _dist > _limit || _tamper;
     _status = _tamper 
@@ -412,7 +516,7 @@ class _DashState extends State<Dashboard> {
 
     if (mounted) setState(() {});
     
-    if (_lastAlarm != inDanger || (_lastDist - _dist).abs() > 5 || _lastLimit != _limit.toInt()) {
+    if (_lastAlarm != inDanger || (_lastDist - _dist).abs() > 0.5 || _lastLimit != _limit.toInt()) {
       _lastAlarm = inDanger;
       _lastDist = _dist;
       _lastLimit = _limit.toInt();
@@ -484,9 +588,75 @@ class _DashState extends State<Dashboard> {
                 ),
               ],
             );
-          }
+          },
         );
+      },
+    );
+  }
+
+  void _showSignOutDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text("Sign Out & Reset"),
+          content: const Text(
+            "Are you sure you want to sign out? This will clear settings from the app and prompt you to send a WIFI:RESET SMS to reset the tracker's Wi-Fi."
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("CANCEL"),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await _performSignOut();
+              },
+              child: const Text("SIGN OUT", style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _performSignOut() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String sim = prefs.getString('sim_number') ?? '';
+    
+    // Clear SharedPreferences
+    await prefs.remove('sim_number');
+    await prefs.remove('owner_phone');
+    await prefs.remove('ssid');
+    await prefs.remove('wifi_password');
+    
+    // Stop background service
+    try {
+      final service = FlutterBackgroundService();
+      if (await service.isRunning()) {
+        service.invoke("stopService");
       }
+    } catch (e) {
+      debugPrint("Error stopping service: $e");
+    }
+    
+    // Send WIFI:RESET SMS to module
+    if (sim.isNotEmpty) {
+      final Uri smsUri = Uri.parse('sms:$sim?body=WIFI:RESET');
+      try {
+        if (await canLaunchUrl(smsUri)) {
+          await launchUrl(smsUri);
+        }
+      } catch (e) {
+        debugPrint("Error launching SMS: $e");
+      }
+    }
+    
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const RegisterScreen()),
     );
   }
 
@@ -570,11 +740,25 @@ class _DashState extends State<Dashboard> {
             ),
             child: Column(
               children: [
-                Text(
-                  _tamper 
-                      ? "DEVICE REMOVED" 
-                      : (inDanger ? "PROXIMITY ALERT" : "SYSTEM SECURE"),
-                  style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const SizedBox(width: 48), // Spacer to balance logout icon button
+                    Expanded(
+                      child: Text(
+                        (_bag == null || (_bag!.latitude == 0.0 && _bag!.longitude == 0.0))
+                            ? (_lbs ? "LBS LOCATION ACTIVE" : "CONNECTING TO GPS...")
+                            : (_tamper ? "DEVICE REMOVED" : (inDanger ? "PROXIMITY ALERT" : "SYSTEM SECURE")),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.logout, color: Colors.white),
+                      tooltip: "Sign Out & Reset Wi-Fi",
+                      onPressed: _showSignOutDialog,
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 20),
                 BatteryGauge(percentage: _batteryLevel),
@@ -582,7 +766,11 @@ class _DashState extends State<Dashboard> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    _buildStatItem(Icons.social_distance, "${_dist.toInt()} m", "Distance"),
+                    _buildStatItem(
+                      Icons.social_distance,
+                      _wifiDist > 0.0 ? "${_dist.toStringAsFixed(1)} m" : "${_dist.toInt()} m",
+                      "Distance",
+                    ),
                     _buildStatItem(Icons.tune, "${_limit.toInt()} m", "Limit", onTap: _showLimitDialog),
                   ],
                 ),
@@ -618,50 +806,280 @@ class _DashState extends State<Dashboard> {
               child: Column(
                 children: [
                   // --- DEVICE REMOVAL STATUS CARD ---
+                  (_bag == null || (_bag!.latitude == 0.0 && _bag!.longitude == 0.0))
+                  ? Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      margin: const EdgeInsets.only(bottom: 15),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[100],
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: Colors.grey[350]!,
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.cloud_off,
+                            color: Colors.grey[600],
+                            size: 36,
+                          ),
+                          const SizedBox(width: 15),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "Device Connection Status",
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                    color: Colors.grey[800],
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                const Text(
+                                  "Tracking module is offline. Awaiting connection...",
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.black54,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      margin: const EdgeInsets.only(bottom: 15),
+                      decoration: BoxDecoration(
+                        color: _tamper ? const Color(0xFFFFEBEE) : const Color(0xFFE8F5E9),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: _tamper ? const Color(0xFFEF5350) : const Color(0xFF66BB6A),
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _tamper ? Icons.report_problem : Icons.gpp_good,
+                            color: _tamper ? const Color(0xFFD32F2F) : const Color(0xFF388E3C),
+                            size: 36,
+                          ),
+                          const SizedBox(width: 15),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "Device Removal Status",
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                    color: _tamper ? const Color(0xFFB71C1C) : const Color(0xFF1B5E20),
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _tamper 
+                                      ? "Your device has been removed from your bag" 
+                                      : "The tracking module is securely inside the bag.",
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: _tamper ? const Color(0xFFC62828) : const Color(0xFF2E7D32),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  // --- GPS & BATTERY TELEMETRY CARD ---
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(20),
                     margin: const EdgeInsets.only(bottom: 15),
                     decoration: BoxDecoration(
-                      color: _tamper ? const Color(0xFFFFEBEE) : const Color(0xFFE8F5E9),
+                      color: Colors.white,
                       borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: _tamper ? const Color(0xFFEF5350) : const Color(0xFF66BB6A),
-                        width: 1.5,
-                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.05),
+                          blurRadius: 10,
+                          offset: const Offset(0, 5),
+                        )
+                      ],
                     ),
-                    child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          _tamper ? Icons.report_problem : Icons.gpp_good,
-                          color: _tamper ? const Color(0xFFD32F2F) : const Color(0xFF388E3C),
-                          size: 36,
-                        ),
-                        const SizedBox(width: 15),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                "Device Removal Status",
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                  color: _tamper ? const Color(0xFFB71C1C) : const Color(0xFF1B5E20),
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                _tamper 
-                                    ? "Your device has been removed from your bag" 
-                                    : "The tracking module is securely inside the bag.",
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: _tamper ? const Color(0xFFC62828) : const Color(0xFF2E7D32),
-                                ),
-                              ),
-                            ],
+                        const Text(
+                          "Tracking Module Status",
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                            color: Colors.black87,
                           ),
+                        ),
+                        const SizedBox(height: 15),
+                        // GPS Fix section
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              _gpsLocked
+                                  ? Icons.gps_fixed
+                                  : (_lbs ? Icons.cell_tower : Icons.gps_off),
+                              color: _gpsLocked
+                                  ? Colors.green
+                                  : (_lbs ? Colors.blue : Colors.orange),
+                              size: 24,
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _gpsLocked
+                                        ? "GPS Status: Satellite Lock"
+                                        : (_lbs ? "GPS Status: LBS Coarse Fix" : "GPS Status: Searching..."),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _gpsLocked
+                                        ? "Locked onto satellites. High-accuracy real-time location tracking active."
+                                        : (_lbs 
+                                            ? "Estimated from cellular mobile towers. Connecting to satellites..."
+                                            : "Searching for satellite signals. Please take the module outdoors for a faster lock."),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Divider(height: 25, thickness: 0.8),
+                        // Battery level section
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              _batteryLevel < 20
+                                  ? Icons.battery_alert
+                                  : (_batteryLevel < 50 ? Icons.battery_3_bar : Icons.battery_full),
+                              color: _batteryLevel < 20
+                                  ? Colors.red
+                                  : (_batteryLevel < 50 ? Colors.orange : Colors.green),
+                              size: 24,
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    "Battery Status: $_batteryLevel%",
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _batteryLevel < 20
+                                        ? "Battery level is critical! Please connect the module to a charger immediately."
+                                        : (_batteryLevel >= 95 
+                                            ? "Battery is fully charged. Ready for long-term tracking."
+                                            : "Battery level is healthy. Normal operation mode."),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Divider(height: 25, thickness: 0.8),
+                        // GSM Signal Strength Section
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              _csqVal == 0
+                                  ? Icons.signal_cellular_null
+                                  : Icons.signal_cellular_alt,
+                              color: _csqVal == 0
+                                  ? Colors.grey
+                                  : (_csqVal < 10
+                                      ? Colors.red
+                                      : (_csqVal < 15
+                                          ? Colors.orange
+                                          : (_csqVal < 20
+                                              ? Colors.amber
+                                              : Colors.green))),
+                              size: 24,
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _csqVal == 0
+                                        ? "GSM Signal: No Signal"
+                                        : (_csqVal < 10
+                                            ? "GSM Signal: Very Weak"
+                                            : (_csqVal < 15
+                                                ? "GSM Signal: Poor Connection"
+                                                : (_csqVal < 20
+                                                    ? "GSM Signal: Stable Connection"
+                                                    : "GSM Signal: Excellent Connection"))),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _csqVal == 0
+                                        ? "No cellular network connection detected. Ensure your SIM card is active and inserted properly."
+                                        : (_csqVal < 10
+                                            ? "Signal is critical! Connection may drop. Make sure antenna is securely attached."
+                                            : (_csqVal < 15
+                                                ? "Poor signal strength. Tracker may consume more battery to maintain connection."
+                                                : (_csqVal < 20
+                                                    ? "Signal strength is stable. Normal tracking mode active."
+                                                    : "Strong connection. Optimal real-time tracking performance."))),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),

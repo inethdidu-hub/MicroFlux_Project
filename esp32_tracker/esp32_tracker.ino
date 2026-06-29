@@ -931,7 +931,7 @@ void loop() {
       }
     }
 
-    bool shouldUpload = tamperChanged || locationMoved || (now - lastTelemetryUpload > (currentNetMode == NET_WIFI ? 1000 : 60000));
+    bool shouldUpload = tamperChanged || locationMoved || (now - lastTelemetryUpload > (currentNetMode == NET_WIFI ? 400 : 60000));
 
     if (shouldUpload) {
       String lat = "0.0";

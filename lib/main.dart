@@ -159,10 +159,15 @@ class _RegisterState extends State<RegisterScreen> {
           permission = await Geolocator.requestPermission();
         }
         if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
-          Position position = await Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.high,
-            timeLimit: const Duration(seconds: 5),
-          );
+          // Fast check using last known position first (instant)
+          Position? position = await Geolocator.getLastKnownPosition();
+          if (position == null) {
+            // Low-accuracy fast check with a 2-second timeout as a fallback
+            position = await Geolocator.getCurrentPosition(
+              desiredAccuracy: LocationAccuracy.low,
+              timeLimit: const Duration(seconds: 2),
+            );
+          }
           phoneLat = position.latitude;
           phoneLon = position.longitude;
         }
@@ -207,21 +212,24 @@ class _RegisterState extends State<RegisterScreen> {
         await initializeBackgroundService();
       }
 
-      // Launch SMS configuration composer automatically
-      final Uri smsUri = Uri.parse('sms:$sim?body=WIFI:$ssid,$pass');
-      try {
-        if (await canLaunchUrl(smsUri)) {
-          await launchUrl(smsUri);
-        }
-      } catch (e) {
-        debugPrint("Error launching SMS composer: $e");
-      }
-
+      // Navigate to Dashboard immediately first so it is ready when user returns
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const Dashboard()),
       );
+
+      // Launch SMS configuration composer in background asynchronously
+      final Uri smsUri = Uri.parse('sms:$sim?body=WIFI:$ssid,$pass');
+      try {
+        canLaunchUrl(smsUri).then((canLaunch) {
+          if (canLaunch) {
+            launchUrl(smsUri);
+          }
+        });
+      } catch (e) {
+        debugPrint("Error launching SMS composer: $e");
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -338,7 +346,7 @@ class _DashState extends State<Dashboard> {
   double _dist = 0;
   double _wifiDist = -1.0;
   double _limit = 20.0;
-  bool _ringcut = false;
+
   bool _led = false;
   bool _buzzer = false;
   bool _playMusicMode = true;
@@ -353,6 +361,21 @@ class _DashState extends State<Dashboard> {
   double _alarmVolume = 1.0;
   double? _bagLat;
   double? _bagLon;
+
+  final List<StreamSubscription> _subscriptions = [];
+
+  void _cancelSubscriptions() {
+    for (var sub in _subscriptions) {
+      sub.cancel();
+    }
+    _subscriptions.clear();
+  }
+
+  @override
+  void dispose() {
+    _cancelSubscriptions();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -380,98 +403,127 @@ class _DashState extends State<Dashboard> {
       return;
     }
 
-    Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
-      ),
-    ).listen((Position p) {
-      if (!mounted) return;
-      setState(() => _phone = LatLng(p.latitude, p.longitude));
-      _updateLogic();
-    });
-
-    _db.child("bag_data/lat").onValue.listen((event) {
-      if (!mounted) return;
-      final val = event.snapshot.value;
-      if (val != null) {
-        _bagLat = double.tryParse(val.toString());
-        _updateBagLatLng();
-      }
-    });
-
-    _db.child("bag_data/lon").onValue.listen((event) {
-      if (!mounted) return;
-      final val = event.snapshot.value;
-      if (val != null) {
-        _bagLon = double.tryParse(val.toString());
-        _updateBagLatLng();
-      }
-    });
-
-    _db.child("bag_data/battery").onValue.listen((event) {
-      if (!mounted) return;
-      if (event.snapshot.value != null) {
-        setState(() {
-          _batteryLevel = int.tryParse(event.snapshot.value.toString()) ?? 0;
-        });
-      }
-    });
-
-    _db.child("bag_data/tamper").onValue.listen((event) {
-      if (!mounted) return;
-      final val = event.snapshot.value;
-      setState(() {
-        _tamper = (val == true || val == "true" || val == 1);
-      });
-      _updateLogic();
-    });
-
-    _db.child("bag_data/lbs").onValue.listen((event) {
-      if (!mounted) return;
-      final val = event.snapshot.value;
-      setState(() {
-        _lbs = (val == true || val == "true" || val == 1);
-      });
-      _updateLogic();
-    });
-
-    _db.child("bag_data/wifi_dist").onValue.listen((event) {
-      if (!mounted) return;
-      final val = event.snapshot.value;
-      if (val != null) {
-        setState(() {
-          _wifiDist = double.tryParse(val.toString()) ?? -1.0;
-        });
+    // Instantly get last known position to resolve null state under 10ms
+    try {
+      Position? lastPos = await Geolocator.getLastKnownPosition();
+      if (lastPos != null && mounted) {
+        setState(() => _phone = LatLng(lastPos.latitude, lastPos.longitude));
         _updateLogic();
       }
-    });
+    } catch (_) {}
 
-    _db.child("bag_data/gps_locked").onValue.listen((event) {
-      if (!mounted) return;
-      final val = event.snapshot.value;
-      setState(() {
-        _gpsLocked = (val == true || val == "true" || val == 1);
-      });
-      _updateLogic();
-    });
+    _subscriptions.add(
+      Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 2,
+        ),
+      ).listen((Position p) {
+        if (!mounted) return;
+        setState(() => _phone = LatLng(p.latitude, p.longitude));
+        _updateLogic();
+      })
+    );
 
-    _db.child("bag_data/csq").onValue.listen((event) {
-      if (!mounted) return;
-      if (event.snapshot.value != null) {
+    _subscriptions.add(
+      _db.child("bag_data/lat").onValue.listen((event) {
+        if (!mounted) return;
+        final val = event.snapshot.value;
+        if (val != null) {
+          _bagLat = double.tryParse(val.toString());
+          _updateBagLatLng();
+        }
+      })
+    );
+
+    _subscriptions.add(
+      _db.child("bag_data/lon").onValue.listen((event) {
+        if (!mounted) return;
+        final val = event.snapshot.value;
+        if (val != null) {
+          _bagLon = double.tryParse(val.toString());
+          _updateBagLatLng();
+        }
+      })
+    );
+
+    _subscriptions.add(
+      _db.child("bag_data/battery").onValue.listen((event) {
+        if (!mounted) return;
+        if (event.snapshot.value != null) {
+          setState(() {
+            _batteryLevel = int.tryParse(event.snapshot.value.toString()) ?? 0;
+          });
+        }
+      })
+    );
+
+    _subscriptions.add(
+      _db.child("bag_data/tamper").onValue.listen((event) {
+        if (!mounted) return;
+        final val = event.snapshot.value;
         setState(() {
-          _csqVal = int.tryParse(event.snapshot.value.toString()) ?? 0;
+          _tamper = (val == true || val == "true" || val == 1);
         });
-      }
-    });
+        _updateLogic();
+      })
+    );
 
-    FlutterBackgroundService().on('ringing_status').listen((event) {
-      if (event != null && mounted) {
+    _subscriptions.add(
+      _db.child("bag_data/lbs").onValue.listen((event) {
+        if (!mounted) return;
+        final val = event.snapshot.value;
         setState(() {
-          _isRinging = event['ringing'] == true;
+          _lbs = (val == true || val == "true" || val == 1);
         });
-      }
-    });
+        _updateLogic();
+      })
+    );
+
+    _subscriptions.add(
+      _db.child("bag_data/wifi_dist").onValue.listen((event) {
+        if (!mounted) return;
+        final val = event.snapshot.value;
+        if (val != null) {
+          setState(() {
+            _wifiDist = double.tryParse(val.toString()) ?? -1.0;
+          });
+          _updateLogic();
+        }
+      })
+    );
+
+    _subscriptions.add(
+      _db.child("bag_data/gps_locked").onValue.listen((event) {
+        if (!mounted) return;
+        final val = event.snapshot.value;
+        setState(() {
+          _gpsLocked = (val == true || val == "true" || val == 1);
+        });
+        _updateLogic();
+      })
+    );
+
+    _subscriptions.add(
+      _db.child("bag_data/csq").onValue.listen((event) {
+        if (!mounted) return;
+        if (event.snapshot.value != null) {
+          setState(() {
+            _csqVal = int.tryParse(event.snapshot.value.toString()) ?? 0;
+          });
+        }
+      })
+    );
+
+    _subscriptions.add(
+      FlutterBackgroundService().on('ringing_status').listen((event) {
+        if (event != null && mounted) {
+          setState(() {
+            _isRinging = event['ringing'] == true;
+          });
+        }
+      })
+    );
   }
 
   void _updateBagLatLng() {
@@ -484,12 +536,30 @@ class _DashState extends State<Dashboard> {
   }
 
   void _updateLogic() {
+    // If Wi-Fi distance is active, update and check alarm conditions instantly (even if GPS is null)
+    if (_wifiDist > 0.0) {
+      _dist = _wifiDist;
+      final bool inDanger = _dist > _limit || _tamper;
+      _status = _tamper 
+          ? "🚨 DEVICE REMOVED" 
+          : (inDanger ? "⚠️ PROXIMITY VIOLATION" : "🛡️ System Secure (Wi-Fi Zone)");
+      if (mounted) setState(() {});
+      
+      if (_lastAlarm != inDanger || (_lastDist - _dist).abs() > 0.5 || _lastLimit != _limit.toInt()) {
+        _lastAlarm = inDanger;
+        _lastDist = _dist;
+        _lastLimit = _limit.toInt();
+        _sendCommandsToFirebase();
+      }
+      return;
+    }
+
     if (_phone == null || _bag == null) return;
 
     bool isGPSInvalid = (_bag!.latitude == 0.0 && _bag!.longitude == 0.0);
     bool isLbs = _lbs == true;
 
-    if (isGPSInvalid && _wifiDist <= 0.0) {
+    if (isGPSInvalid) {
       setState(() {
         _status = isLbs ? "LBS Location Active" : "Connecting to GPS...";
         _dist = 0.0;
@@ -498,16 +568,12 @@ class _DashState extends State<Dashboard> {
       return;
     }
 
-    if (_wifiDist > 0.0) {
-      _dist = _wifiDist;
-    } else {
-      _dist = Geolocator.distanceBetween(
-        _phone!.latitude,
-        _phone!.longitude,
-        _bag!.latitude,
-        _bag!.longitude,
-      );
-    }
+    _dist = Geolocator.distanceBetween(
+      _phone!.latitude,
+      _phone!.longitude,
+      _bag!.latitude,
+      _bag!.longitude,
+    );
 
     final bool inDanger = _dist > _limit || _tamper;
     _status = _tamper 
@@ -530,7 +596,6 @@ class _DashState extends State<Dashboard> {
 
   void _sendCommandsToFirebase() {
     _db.child("commands").update({
-      "rc": _ringcut,
       "l": _led,
       "b": _buzzer,
       "alarm": (_dist > _limit || _tamper),
@@ -622,6 +687,7 @@ class _DashState extends State<Dashboard> {
   }
 
   Future<void> _performSignOut() async {
+    _cancelSubscriptions();
     final prefs = await SharedPreferences.getInstance();
     final String sim = prefs.getString('sim_number') ?? '';
     
@@ -635,7 +701,7 @@ class _DashState extends State<Dashboard> {
     try {
       final service = FlutterBackgroundService();
       if (await service.isRunning()) {
-        service.invoke("stopService");
+        service.invoke("stop_service");
       }
     } catch (e) {
       debugPrint("Error stopping service: $e");
@@ -1152,10 +1218,7 @@ class _DashState extends State<Dashboard> {
                         setState(() => _buzzer = !_buzzer);
                         _sendCommandsToFirebase();
                       }, isActive: _buzzer),
-                      _buildGridItem("Ringcut", Icons.phone_android, Colors.red, () {
-                        setState(() => _ringcut = !_ringcut);
-                        _sendCommandsToFirebase();
-                      }, isActive: _ringcut),
+
                       _buildGridItem("Phone Alarm", Icons.music_note, Colors.purple, () async {
                         setState(() => _playMusicMode = !_playMusicMode);
                         final prefs = await SharedPreferences.getInstance();

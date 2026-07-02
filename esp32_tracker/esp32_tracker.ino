@@ -31,6 +31,11 @@ const int ledPin = 14, buzzerPin = 13, onboardLED = 2, reedPin = 32, voltPin = 3
 TinyGPSPlus gps;
 Preferences prefs;
 
+// Global HTTP Keep-Alive Clients for Wi-Fi Real-time Telemetry
+WiFiClientSecure wifiSecureClient;
+HTTPClient wifiHttpClient;
+bool wifiHttpInitialized = false;
+
 String userPhone = "", apn = "mobitel", lastSmsSender = "", a9gBuffer = "", lastCallerPhone = "";
 bool gprsConnected = false, incomingSmsFlag = false;
 bool ussdPending = false, riskZone = false, appAlarm = false, appLight = false, lastMagnetAway = false;
@@ -635,19 +640,22 @@ void sendLocationSMS(String phone) {
 
 void httpPatch(String path, String payload) {
   if (currentNetMode == NET_WIFI) {
-    WiFiClientSecure client;
-    client.setInsecure(); // Bypass certificate validation for simplicity
-    HTTPClient http;
-    String url = "https://microplux-anti-theft-app-2026-default-rtdb.firebaseio.com/" + path;
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/json");
-    int httpCode = http.sendRequest("PATCH", payload);
+    if (!wifiHttpInitialized) {
+      wifiSecureClient.setInsecure();
+      String url = "https://microplux-anti-theft-app-2026-default-rtdb.firebaseio.com/" + path;
+      wifiHttpClient.setReuse(true); // Enable HTTP Keep-Alive/Connection Reuse
+      wifiHttpClient.begin(wifiSecureClient, url);
+      wifiHttpClient.addHeader("Content-Type", "application/json");
+      wifiHttpInitialized = true;
+    }
+    int httpCode = wifiHttpClient.sendRequest("PATCH", payload);
     if (httpCode > 0) {
       printPC("[HTTP-WIFI] PATCH successful. Code: " + String(httpCode) + " | Payload: " + payload);
     } else {
-      printPC("[HTTP-WIFI] PATCH failed. Error: " + http.errorToString(httpCode));
+      printPC("[HTTP-WIFI] PATCH failed. Error: " + wifiHttpClient.errorToString(httpCode));
+      wifiHttpClient.end();
+      wifiHttpInitialized = false; // Re-establish connection on next transmission
     }
-    http.end();
   } else {
     if (mqttActive && path.indexOf("bag_data") != -1) {
       String latVal = parseJsonString(payload, "lat");
@@ -913,7 +921,7 @@ void loop() {
       }
     }
 
-    bool shouldUpload = tamperChanged || locationMoved || (now - lastTelemetryUpload > (currentNetMode == NET_WIFI ? 400 : 60000));
+    bool shouldUpload = tamperChanged || locationMoved || (now - lastTelemetryUpload > (currentNetMode == NET_WIFI ? 150 : 60000));
 
     if (shouldUpload) {
       String lat = "0.0";

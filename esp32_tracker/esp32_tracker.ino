@@ -8,6 +8,8 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 
+#define DEBUG_PRINTS 0 // Set to 1 to enable PC debug logging, 0 to compile out for maximum stability and speed
+
 // ThingSpeak ThingHTTP Proxy configuration
 const String TS_URL = "http://api.thingspeak.com/apps/thinghttp/send_request";
 String tsGetCommandsKey = "CKJ2JJ1UUD3ED45G";
@@ -117,8 +119,10 @@ int readLocalBattery();
 
 // Helper function to print clean debug messages to PC Serial Monitor (also ignored by A9G)
 void printPC(String msg) {
+#if DEBUG_PRINTS
   Serial.println(msg);
   Serial.flush();
+#endif
 }
 
 // Pulse Pin 15 to ground PWR_KEY via transistor Q2 for 2 seconds to hardware-boot A9G
@@ -921,7 +925,7 @@ void loop() {
       }
     }
 
-    bool shouldUpload = tamperChanged || locationMoved || (now - lastTelemetryUpload > (currentNetMode == NET_WIFI ? 150 : 60000));
+    bool shouldUpload = tamperChanged || locationMoved || (now - lastTelemetryUpload > (currentNetMode == NET_WIFI ? 80 : 60000));
 
     if (shouldUpload) {
       String lat = "0.0";

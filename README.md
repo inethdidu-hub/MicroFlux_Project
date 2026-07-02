@@ -62,6 +62,14 @@ graph TD
     App <-->|Firebase SDK / Live Sync| Firebase
 ```
 
+### 🔌 Circuit Schematic & PCB Design
+
+Below are the custom circuit schematic and PCB board layout designed for the MicroFlux tracker:
+
+| Circuit Schematic | PCB Layout |
+| :---: | :---: |
+| ![Circuit Schematic](assets/circuit_schematic.png) | ![PCB Layout](assets/pcb_routing.jpg) |
+
 ---
 
 ## 🔌 Hardware Pinout & Wiring
@@ -71,7 +79,7 @@ graph TD
 | **GPIO 13 (IO13)** | Buzzer (Active Piezo) | Positive terminal of warning alarm buzzer |
 | **GPIO 14 (IO14)** | Warning LED | Active-high LED warning indicator |
 | **GPIO 15 (IO15)** | A9G PWR_KEY | Connected to A9G Power pin via transistor to boot/reset the module |
-| **GPIO 26 (IO26)** | Reed Switch | Magnetic tamper detection sensor (Input Pull-up) |
+| **GPIO 32 (IO32)** | Reed Switch | Magnetic tamper detection sensor (Input / Active-Low) |
 | **GPIO 34 (IO34)** | Battery Divider | Analog Input connected to middle of a 100k/100k voltage divider |
 | **GPIO 16 (RX2)** | A9G TXD | Serial receive pin from cellular module |
 | **GPIO 17 (TX2)** | A9G RXD | Serial transmit pin to cellular module |
@@ -90,6 +98,14 @@ The Flutter mobile application provides a premium visual interface with the foll
 *   **Sign Out (Logout):** Top-right header button clears saved preferences, terminates local background sync services, and opens the SMS app pre-filled with `WIFI:RESET` to clean the device configuration.
 *   **Battery Status Gauge:** Custom-painted visual indicator syncing with ESP32 local ADC.
 *   **GSM Signal Strength Card:** Dynamic cellular strength parser displaying network quality descriptions (Excellent, Good, Poor, Weak, No Signal) with matching status bar colors.
+
+### 💻 Software Development & Database Console
+
+Here are previews of the development environment and the cloud database structure:
+
+| Firebase RTDB JSON Tree | Arduino IDE Console | VS Code (main.dart) |
+| :---: | :---: | :---: |
+| ![Firebase RTDB](assets/firebase_rtdb.jpg) | ![Arduino IDE](assets/arduino_ide.jpg) | ![VS Code](assets/vscode_main_dart.jpg) |
 
 ---
 

@@ -93,7 +93,13 @@ Below are the custom circuit schematic and PCB board layout designed for the Mic
 
 ## 📱 Mobile App UI Preview & Configurations
 
-The Flutter mobile application provides a premium visual interface with the following dashboard components:
+The Flutter mobile application provides a premium, user-friendly dashboard interface:
+
+<p align="center">
+  <img src="assets/mobile_dashboard.jpg" width="280" alt="Microflux Mobile App Dashboard">
+</p>
+
+### Key Dashboard Components:
 *   **Dynamic Title Header:** Color-shifts between Green (System Secure) and Red (Proximity Alert / Tamper Triggered).
 *   **Sign Out (Logout):** Top-right header button clears saved preferences, terminates local background sync services, and opens the SMS app pre-filled with `WIFI:RESET` to clean the device configuration.
 *   **Battery Status Gauge:** Custom-painted visual indicator syncing with ESP32 local ADC.

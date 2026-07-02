@@ -23,7 +23,7 @@ String tsMqttUsername = "DDYqNyUwKjQVCyguAwwVHhY";  // ThingSpeak MQTT Username
 String tsMqttPassword = "DwINN09LTBCMgesANiAIbRi7";  // ThingSpeak MQTT Password
 bool mqttActive = false;
 
-const int ledPin = 14, buzzerPin = 13, onboardLED = 2, reedPin = 26, voltPin = 34;
+const int ledPin = 14, buzzerPin = 13, onboardLED = 2, reedPin = 32, voltPin = 34;
 
 // Map A9G directly to Serial (UART0) to match the custom PCB routing
 #define A9G Serial
@@ -219,7 +219,7 @@ void setup() {
   pinMode(ledPin, OUTPUT); 
   pinMode(buzzerPin, OUTPUT); 
   pinMode(onboardLED, OUTPUT); 
-  pinMode(reedPin, INPUT_PULLUP);
+  pinMode(reedPin, INPUT);
 
   // Startup beep test to verify buzzer hardware wiring on Pin 13
   printPC("[SYSTEM] Running startup buzzer beep test on Pin 13...");
@@ -340,6 +340,25 @@ bool waitNetworkRegister() {
     resp.trim();
     if (resp.length() > 0) {
       printPC("[A9G-REG] Response: " + resp);
+      
+      // Parse battery and signal updates from reg response
+      int startIdx = 0;
+      while (startIdx < resp.length()) {
+        int nextNewline = resp.indexOf('\n', startIdx);
+        String subLine = "";
+        if (nextNewline != -1) {
+          subLine = resp.substring(startIdx, nextNewline);
+          startIdx = nextNewline + 1;
+        } else {
+          subLine = resp.substring(startIdx);
+          startIdx = resp.length();
+        }
+        subLine.trim();
+        if (subLine.length() > 0) {
+          handleA9GLine(subLine);
+        }
+      }
+      
       if (resp.indexOf("+CREG: 1,1") != -1 || resp.indexOf("+CREG: 1,5") != -1 || 
           resp.indexOf("+CREG: 0,1") != -1 || resp.indexOf("+CREG: 0,5") != -1 ||
           resp.indexOf("+CREG: 2,1") != -1 || resp.indexOf("+CREG: 2,5") != -1 ||
@@ -411,6 +430,7 @@ bool initGPRS() {
         line.trim();
         if (line.length() > 0) {
           printPC("[A9G-RAW] " + line);
+          handleA9GLine(line); // Parse battery and CSQ reports
           if (line.indexOf("OK") != -1 || line.indexOf("+CGATT:1") != -1 || line.indexOf("+CGATT: 1") != -1) {
             attached = true;
             break;
@@ -443,6 +463,7 @@ bool initGPRS() {
         line.trim();
         if (line.length() > 0) {
           printPC("[A9G-RAW] " + line);
+          handleA9GLine(line); // Parse battery and CSQ reports
           if (line.indexOf("OK") != -1) {
             contextActive = true;
             break;
@@ -522,6 +543,7 @@ bool initGPRS() {
           line.trim();
           if (line.length() > 0) {
             printPC("[A9G-RAW] " + line);
+            handleA9GLine(line); // Parse battery and CSQ reports
             if (line.indexOf("OK") != -1 || line.indexOf("ALREADY") != -1) {
               mqttConnected = true;
               break;
@@ -549,6 +571,7 @@ bool initGPRS() {
           line.trim();
           if (line.length() > 0) {
             printPC("[A9G-RAW] " + line);
+            handleA9GLine(line); // Parse battery and CSQ reports
           }
         }
         delay(5);
@@ -712,46 +735,7 @@ void loop() {
       lastA9GActivity = millis();
     }
   } else if (currentNetMode == NET_WIFI) {
-    // Super-Safe OFF-Only Watchdog for Wi-Fi Mode
-    // Only runs if GPS stream is silent for more than 45 seconds
-    if (millis() - lastA9GActivity > 45000) {
-      static unsigned long lastA9GResponsivenessCheck = 0;
-      if (now - lastA9GResponsivenessCheck > 15000) { // Throttle AT checks to once every 15 seconds
-        lastA9GResponsivenessCheck = now;
-        printPC("[SYSTEM] WiFi Watchdog: GPS stream silent for 45s. Checking if A9G is OFF...");
-        
-        bool responsive = false;
-        for (int i = 0; i < 3; i++) {
-          while (A9G.available() > 0) A9G.read(); // Flush garbage
-          A9G.println("AT");
-          unsigned long start = millis();
-          while (millis() - start < 500) {
-            if (A9G.available() > 0) {
-              String r = A9G.readString();
-              if (r.indexOf("OK") != -1 || r.indexOf("$GN") != -1 || r.indexOf("$GP") != -1 || 
-                  r.indexOf("+GPSRD") != -1 || r.indexOf("CME ERROR") != -1 || r.indexOf("READY") != -1) {
-                responsive = true;
-                break;
-              }
-            }
-          }
-          if (responsive) break;
-          delay(200);
-        }
-        
-        if (responsive) {
-          printPC("[SYSTEM] A9G is ON but GPS stream was silent. Restarting GPS receiver...");
-          A9G.println("AT+GPS=1");
-          delay(100);
-          A9G.println("AT+GPSRD=2");
-          lastA9GActivity = now; // Reset watchdog timer
-        } else {
-          printPC("[SYSTEM] A9G is OFF/Frozen. Initializing hardware recovery...");
-          hardwarePowerOnA9G(true);
-          lastA9GActivity = now;
-        }
-      }
-    }
+    // Watchdog bypassed in Wi-Fi mode to ensure maximum upload efficiency and zero blocking delays
   }
 
   // 6. Network connectivity self-healing with fallback/switching
@@ -849,13 +833,11 @@ void loop() {
       queryWiFiLocation();
     }
 
-    // Query battery level via local ESP32 ADC (Pin 34) every 10 seconds for live updates
-    // Runs immediately on startup/connection, then every 10 seconds
-    static bool firstBatteryCheckDone = false;
-    if (!firstBatteryCheckDone || (now - lastBatteryCheck > 10000)) {
-      lastBatteryCheck = now;
-      firstBatteryCheckDone = true;
-      a9gBatteryLevel = readLocalBattery();
+    // Query A9G SIM module battery level (+CBC) every 60 seconds
+    static unsigned long lastA9gBatCheck = 0;
+    if (now - lastA9gBatCheck > 60000) {
+      lastA9gBatCheck = now;
+      A9G.println("AT+CBC");
     }
 
     // Query GSM signal strength (CSQ) every 30 seconds (runs in both Wi-Fi and GPRS modes)
@@ -987,8 +969,21 @@ void loop() {
         }
       }
 
-      int rssi = (currentNetMode == NET_WIFI) ? WiFi.RSSI() : 0;
-      double wifiDist = (rssi < 0) ? pow(10.0, (-45.0 - (double)rssi) / 28.0) : -1.0;
+      int rawRssi = (currentNetMode == NET_WIFI) ? WiFi.RSSI() : 0;
+      static float smoothedRssi = -100.0;
+      
+      if (rawRssi < 0) {
+        if (smoothedRssi == -100.0) {
+          smoothedRssi = rawRssi; // Initialize on first read
+        } else {
+          // Exponential Moving Average filter (alpha = 0.25)
+          smoothedRssi = (0.25f * rawRssi) + (0.75f * smoothedRssi);
+        }
+      } else {
+        smoothedRssi = 0;
+      }
+      
+      double wifiDist = (smoothedRssi < 0) ? pow(10.0, (-45.0 - (double)smoothedRssi) / 28.0) : -1.0;
 
       String payload = "{\"lat\":" + lat + ",\"lon\":" + lon + ",\"battery\":" + String(a9gBatteryLevel) + ",\"tamper\":" + (currentTamper ? "true" : "false") + ",\"lbs\":" + (lbsFlag ? "true" : "false") + ",\"wifi_dist\":" + (wifiDist > 0 ? String(wifiDist, 1) : "-1") + ",\"gps_locked\":" + (hasGpsFix ? "true" : "false") + ",\"csq\":" + String(csqVal) + "}";
 
@@ -1281,18 +1276,9 @@ void updateLocalAlerts() {
   bool shouldSoundBuzzer = (appBuzzer && alarmTrigger);
   bool shouldLightLed = (appLed && alarmTrigger);
 
-  // Non-blocking double-beep buzzer pattern matching startup tone (200ms beeps, 100ms gap, 1000ms total cycle)
+  // Continuous buzzer output when triggered, keeping other settings unchanged
   if (shouldSoundBuzzer) {
-    unsigned long cycleTime = millis() % 1000; // 1000ms (1 second) total cycle time
-    if (cycleTime < 200) {
-      digitalWrite(buzzerPin, HIGH); // First beep for 200ms
-    } else if (cycleTime >= 200 && cycleTime < 300) {
-      digitalWrite(buzzerPin, LOW);  // Short silence for 100ms
-    } else if (cycleTime >= 300 && cycleTime < 500) {
-      digitalWrite(buzzerPin, HIGH); // Second beep for 200ms
-    } else {
-      digitalWrite(buzzerPin, LOW);  // Silence gap for 500ms
-    }
+    digitalWrite(buzzerPin, HIGH);
   } else {
     digitalWrite(buzzerPin, LOW);
   }

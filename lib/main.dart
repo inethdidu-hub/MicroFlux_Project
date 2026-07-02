@@ -647,7 +647,9 @@ class _DashState extends State<Dashboard> {
                     await prefs.setDouble('threshold', _limit);
                     FlutterBackgroundService().invoke('set_threshold', {'threshold': _limit});
                     _updateLogic();
-                    Navigator.pop(context);
+                    if (context.mounted) {
+                      Navigator.pop(context);
+                    }
                   }, 
                   child: const Text("SAVE")
                 ),
